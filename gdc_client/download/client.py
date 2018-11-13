@@ -1,26 +1,66 @@
-from parcel import HTTPClient, UDTClient, utils
-from parcel.download_stream import DownloadStream
-from progressbar import Bar, ETA, FileTransferSpeed, Percentage, ProgressBar
-from StringIO import StringIO
-from gdc_client.utils import build_url
-from gdc_client.defaults import SUPERSEDED_INFO_FILENAME_TEMPLATE
-
 import hashlib
 import logging
 import os
-import requests
 import re
 import sys
 import tarfile
 import time
 import urlparse
+from StringIO import StringIO
 
+import requests
+from parcel import HTTPClient, UDTClient, utils
+from parcel.download_stream import DownloadStream
+from progressbar import ETA, Bar, FileTransferSpeed, Percentage, ProgressBar
+
+from gdc_client.defaults import SUPERSEDED_INFO_FILENAME_TEMPLATE
+from gdc_client.utils import build_url
 
 log = logging.getLogger('gdc-download')
 
-class GDCDownloadMixin(object):
+
+def fix_url(url):
+    # type: (str) -> str
+    """ Fix a url to be used in the rest of the program
+
+        example:
+            api.gdc.cancer.gov -> https://api.gdc.cancer.gov/
+    """
+    if not url.endswith('/'):
+        url = '{0}/'.format(url)
+
+    if not (url.startswith('https://') or url.startswith('http://')):
+        url = 'https://{0}'.format(url)
+
+    return url
+
+
+class GDCHTTPDownloadClient(HTTPClient):
 
     annotation_name = 'annotations.txt'
+
+    def __init__(self, uri, download_related_files=True, download_annotations=True,
+                 index_client=None, *args, **kwargs):
+        """ GDC parcel client that overrides parallel download
+        Args:
+            uri (str):
+            download_related_files (bool):
+            download_annotations (bool):
+            index_client (gdc_client.query.index.GDCIndexClient): gdc api files index client
+        """
+
+        self.base_uri = uri
+        self.data_uri = urlparse.urljoin(self.base_uri, 'data/')
+
+        self.annotations = download_annotations
+        self.related_files = download_related_files
+
+        self.md5_check = kwargs.get('file_md5sum')
+
+        self.gdc_index_client = index_client
+        self.base_directory = kwargs.get('directory')
+
+        super(GDCHTTPDownloadClient, self).__init__(self.data_uri, *args, **kwargs)
 
     def download_related_files(self, file_id):
         # type: (str) -> None
@@ -31,7 +71,7 @@ class GDCDownloadMixin(object):
         # The primary entity's directory
         directory = os.path.join(self.base_directory, file_id)
 
-        related_files = self.index.get_related_files(file_id)
+        related_files = self.gdc_index_client.get_related_files(file_id)
         if related_files:
 
             log.debug("Found {0} related files for {1}.".format(len(related_files), file_id))
@@ -45,7 +85,8 @@ class GDCDownloadMixin(object):
                 # hacky way to get it working like the old dtt
                 stream.directory = directory
 
-                self._download(self.n_procs, stream)
+                # run original parallel download
+                super(GDCHTTPDownloadClient, self).parallel_download(stream)
 
                 if os.path.isfile(stream.temp_path):
                     utils.remove_partial_extension(stream.temp_path)
@@ -61,8 +102,7 @@ class GDCDownloadMixin(object):
         # The primary entity's directory
         directory = os.path.join(self.base_directory, file_id)
 
-        annotations = self.index.get_annotations(file_id)
-        annotation_list = ','.join(annotations)
+        annotations = self.gdc_index_client.get_annotations(file_id)
 
         if annotations:
             log.debug('Found {0} annotations for {1}.'.format(len(annotations), file_id))
@@ -79,24 +119,24 @@ class GDCDownloadMixin(object):
                 with open(path, 'w') as f:
                     f.write(ann)
 
-            log.debug('Wrote annotations to {0}.'.format(path))
+                log.debug('Wrote annotations to {0}.'.format(path))
 
     def _untar_file(self, tarfile_name):
-        # type: (str) -> List[str]
+        # type: (str) -> list[str]
         """ untar the file and return all the file names inside the tarfile """
 
         t = tarfile.open(tarfile_name)
-        members = [ m for m in t.getmembers() if m.name != 'MANIFEST.txt' ]
+        members = [m for m in t.getmembers() if m.name != 'MANIFEST.txt']
         t.extractall(members=members, path=self.base_directory)
         t.close()
 
         # cleanup
         os.remove(tarfile_name)
 
-        return [ m.name for m in members ]
+        return [m.name for m in members]
 
     def _md5_members(self, members):
-        # type: (List[str]) -> List[str]
+        # type: (list[str]) -> list[str]
         """ Calculate md5 hash and compare them with values given by the API """
 
         errors = []
@@ -114,14 +154,14 @@ class GDCDownloadMixin(object):
             with open(filename, 'rb') as f:
                 md5sum.update(f.read())
 
-            if self.index.get_md5sum(member_uuid) != md5sum.hexdigest():
+            if self.gdc_index_client.get_md5sum(member_uuid) != md5sum.hexdigest():
                 log.error('UUID {0} has invalid md5sum'.format(member_uuid))
                 errors.append(member_uuid)
 
         return errors
 
     def _post(self, path, headers=None, json=None, stream=True):
-        # type: (str, Dict[str]str, Dict[str]str, bool) -> requests.models.Response
+        # type: (str, dict[str,str], dict[str,object], bool) -> requests.models.Response
         """ custom post request that will query both active and legacy api
 
         return a python requests object to be handled by the method calling self._post
@@ -155,11 +195,10 @@ class GDCDownloadMixin(object):
 
         return r
 
-    def _download_tarfile(self, small_files, latest):
-        # type: (List[str]) -> str, List[str]
+    def _download_tarfile(self, small_files):
+        # type: (list[str]) -> tuple[str, object]
         """ Make the request to the API for the tarfile downloads """
 
-        tarfile_name = ""
         errors = []
         headers = {
             'X-Auth-Token': self.token,
@@ -169,7 +208,7 @@ class GDCDownloadMixin(object):
         ids = {"ids": small_files}
 
         # POST request avoids the MAX LEN character limit for URLs
-        params = ('tarfile', 'latest') if latest else ('tarfile',)
+        params = ('tarfile',)
         path = build_url('data', *params)
         r = self._post(path=path, headers=headers, json=ids)
 
@@ -192,12 +231,13 @@ class GDCDownloadMixin(object):
 
         # {'content-disposition': 'filename=the_actual_filename.tar'}
         content_filename = r.headers.get('content-disposition') or \
-                r.headers.get('Content-Disposition')
+            r.headers.get('Content-Disposition')
 
         if content_filename:
             tarfile_name = os.path.join(
-                    self.base_directory,
-                    content_filename.split('=')[1])
+                self.base_directory,
+                content_filename.split('=')[1],
+            )
         else:
             tarfile_name = time.strftime("gdc-client-%Y%m%d-%H%M%S.tar")
 
@@ -209,8 +249,8 @@ class GDCDownloadMixin(object):
 
         return tarfile_name, errors
 
-    def download_small_groups(self, smalls, latest=False):
-        # type: (List[str]) -> List[str], int
+    def download_small_groups(self, smalls):
+        # type: (list[str]) -> tuple[list[str], int]
         """ Download small groups
 
         Smalls are predetermined groupings of smaller file size files.
@@ -218,7 +258,6 @@ class GDCDownloadMixin(object):
         """
 
         successful_count = 0
-        tarfile_name = None
         errors = []
         groupings_len = len(smalls)
 
@@ -234,7 +273,7 @@ class GDCDownloadMixin(object):
             pbar.start()
 
             log.debug('Saving grouping {0}/{1}'.format(i+1, groupings_len))
-            tarfile_name, error = self._download_tarfile(s, latest)
+            tarfile_name, error = self._download_tarfile(s)
 
             # this will happen in the result of an
             # error that shouldn't be retried
@@ -256,16 +295,14 @@ class GDCDownloadMixin(object):
 
         return errors, successful_count
 
-    def parallel_download(self, stream, download_related_files=None,
-                          download_annotations=None, *args, **kwargs):
+    def parallel_download(self, stream):
 
         # gdc-client calls parcel's parallel_download,
         # which is where most of the downloading takes place
         file_id = stream.url.split('/')[-1]
-        super(GDCDownloadMixin, self).parallel_download(stream)
+        super(GDCHTTPDownloadClient, self).parallel_download(stream)
 
-        if download_related_files or \
-           download_related_files is None and self.related_files:
+        if self.related_files:
             try:
                 self.download_related_files(file_id)
             except Exception as e:
@@ -274,8 +311,7 @@ class GDCDownloadMixin(object):
                 if self.debug:
                     raise
 
-        if download_annotations or \
-           download_annotations is None and self.annotations:
+        if self.annotations:
             try:
                 self.download_annotations(file_id)
             except Exception as e:
@@ -284,48 +320,23 @@ class GDCDownloadMixin(object):
                 if self.debug:
                     raise
 
-    def fix_url(self, url):
-        # type: (str) -> str
-        """ Fix a url to be used in the rest of the program
 
-            example:
-                api.gdc.cancer.gov -> https://api.gdc.cancer.gov/
-        """
-        if not url.endswith('/'):
-            url = '{0}/'.format(url)
-
-        if not (url.startswith('https://') or url.startswith('http://')):
-            url = 'https://{0}'.format(url)
-
-        return url
-
-
-class GDCHTTPDownloadClient(GDCDownloadMixin, HTTPClient):
-
-    def __init__(self, uri, index_client, download_related_files=True,
-                 download_annotations=True, *args, **kwargs):
-
-        self.annotations = download_annotations
-        self.base_directory = kwargs.get('directory')
-        self.base_uri = self.fix_url(uri)
-        self.data_uri = urlparse.urljoin(self.base_uri, 'data/')
-        self.index = index_client
-        self.md5_check = kwargs.get('file_md5sum')
-        self.related_files = download_related_files
-        self.verify = kwargs.get('verify')
-
-        super(GDCDownloadMixin, self).__init__(self.data_uri, *args, **kwargs)
-
-
-class GDCUDTDownloadClient(GDCDownloadMixin, UDTClient):
+class GDCUDTDownloadClient(GDCHTTPDownloadClient):
 
     def __init__(self, remote_uri, download_related_files=True,
                  download_annotations=True, *args, **kwargs):
 
-        remote_uri = self.fix_url(remote_uri)
-        self.base_uri = remote_uri
-        self.data_uri = urlparse.urljoin(remote_uri, 'data/')
-        self.related_files = download_related_files
-        self.annotations = download_annotations
-        self.directory = os.path.abspath(time.strftime("gdc-client-%Y%m%d-%H%M%S"))
-        super(GDCDownloadMixin, self).__init__(*args, **kwargs)
+        directory = os.path.abspath(time.strftime("gdc-client-%Y%m%d-%H%M%S"))
+
+        # favoring composition over inheritance
+        self.udt_adapter = UDTClient(*args, **kwargs)
+        super(GDCUDTDownloadClient, self).__init__(uri=fix_url(remote_uri),
+                                                   download_related_files=download_related_files,
+                                                   download_annotations=download_annotations,
+                                                   directory=directory, *args, **kwargs)
+
+    def construct_local_uri(self, proxy_host, proxy_port, remote_uri):
+        return self.udt_adapter.construct_local_uri(proxy_host, proxy_port, remote_uri)
+
+    def start_proxy_server(self, proxy_host, proxy_port, remote_uri):
+        return self.udt_adapter.start_proxy_server(proxy_host, proxy_port, remote_uri)

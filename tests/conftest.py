@@ -5,11 +5,13 @@ import hashlib
 import tarfile
 import pytest
 
+
 def md5(iterable):
     md5 = hashlib.md5()
     for chunk in iterable:
         md5.update(chunk)
     return md5.hexdigest()
+
 
 def make_tarfile(ids, tarfile_name='temp.tar', write_mode='w'):
     """Make a tarfile for the purposes of testing tarfile methods"""
@@ -99,3 +101,14 @@ uuids = {
         'access': 'open',
     },
 }
+
+
+@pytest.fixture
+def versions_response(requests_mock):
+    def mock_response(url, ids, latest_ids):
+        requests_mock.post(url, json=[
+            {'id': file_id, 'latest_id': latest_id}
+            for file_id, latest_id in zip(ids, latest_ids)
+        ])
+
+    return mock_response

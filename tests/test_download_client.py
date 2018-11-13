@@ -1,17 +1,20 @@
-from conftest import md5, uuids, make_tarfile
-from gdc_client.download.client import GDCHTTPDownloadClient
-from gdc_client.query.index import GDCIndexClient
-from multiprocessing import Process, cpu_count
-from parcel.const import HTTP_CHUNK_SIZE, SAVE_INTERVAL
-from unittest import TestCase
-
-import logging
-import mock_server
+import copy
 import os
 import os.path
-import StringIO
 import tarfile
+
+import pytest
 import time
+from multiprocessing import Process, cpu_count
+from unittest import TestCase
+
+from parcel.const import HTTP_CHUNK_SIZE, SAVE_INTERVAL
+from parcel.download_stream import DownloadStream
+
+import mock_server
+from conftest import make_tarfile, md5, uuids
+from gdc_client.download.client import GDCHTTPDownloadClient, fix_url
+from gdc_client.query.index import GDCIndexClient
 
 # default values for flask
 server_host = 'http://127.0.0.1'
@@ -36,6 +39,7 @@ client_kwargs = {
     'verify': True,
 }
 
+
 class DownloadClientTest(TestCase):
     def setUp(self):
         self.server = Process(target=mock_server.app.run)
@@ -54,11 +58,11 @@ class DownloadClientTest(TestCase):
                 index_client=index_client,
                 **client_kwargs)
 
-        assert client.fix_url('api.gdc.cancer.gov') == \
+        assert fix_url('api.gdc.cancer.gov') == \
                 'https://api.gdc.cancer.gov/'
-        assert client.fix_url('http://api.gdc.cancer.gov/') == \
+        assert fix_url('http://api.gdc.cancer.gov/') == \
                 'http://api.gdc.cancer.gov/'
-        assert client.fix_url('api.gdc.cancer.gov/') == \
+        assert fix_url('api.gdc.cancer.gov/') == \
                 'https://api.gdc.cancer.gov/'
 
     def test_untar_file(self):
@@ -127,7 +131,7 @@ class DownloadClientTest(TestCase):
                 **client_kwargs)
 
         # it will remove redundant uuids
-        tarfile_name, errors = client._download_tarfile(files_to_dl, False)
+        tarfile_name, errors = client._download_tarfile(files_to_dl)
 
         assert tarfile_name != None
         assert os.path.exists(tarfile_name)
@@ -139,3 +143,16 @@ class DownloadClientTest(TestCase):
                 contents = m.read()
                 assert contents == uuids[m.name]['contents']
                 os.remove(tarfile_name)
+
+
+@pytest.mark.parametrize("check_segments", (True, False))
+def test_no_segment_md5sums_args(check_segments):
+
+    client_args = copy.deepcopy(client_kwargs)
+    client_args["segment_md5sums"] = check_segments
+    GDCHTTPDownloadClient(
+        uri=base_url,
+        index_client=None,
+        **client_args)
+
+    assert DownloadStream.check_segment_md5sums is check_segments

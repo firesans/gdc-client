@@ -1,17 +1,36 @@
+import argparse
 import logging
+import sys
 from ConfigParser import ConfigParser, NoOptionError, NoSectionError
 
 from gdc_client.defaults import (
-    processes, USER_DEFAULT_CONFIG_LOCATION, HTTP_CHUNK_SIZE
+    processes, USER_DEFAULT_CONFIG_LOCATION, HTTP_CHUNK_SIZE, SAVE_INTERVAL,
+    UPLOAD_PART_SIZE
 )
 
-log = logging.getLogger('gdc-client-config')
+log = logging.getLogger('gdc-client')
+
+# This will display the default configs in a INI-type format, so that users
+# will be able to copy and modify as needed
+DISPLAY_TEMPLATE = '[{}]\n{}\n'
+
+
+class GDCClientArgumentParser(argparse.ArgumentParser):
+    """This is a workaround introduced here https://groups.google.com/forum/#!topic/argparse-users/LazV_tEQvQw
+    which enables to print the full help message in case something went wrong
+    with argument parsing
+    """
+    def error(self, message):
+        self.print_help(sys.stderr)
+        sys.stderr.write('\ngdc-client error: {}\n'.format(message))
+        sys.exit(2)
 
 
 class GDCClientConfigShared(object):
     setting_getters = {
         'server': ConfigParser.get,
         'http_chunk_size': ConfigParser.getint,
+        'upload_part_size': ConfigParser.getint,
         'save_interval': ConfigParser.getint,
         'dir': ConfigParser.get,
         'n_processes': ConfigParser.getint,
@@ -42,12 +61,12 @@ class GDCClientConfigShared(object):
         return {
             'common': {
                 'server': 'https://api.gdc.cancer.gov',
-                'http_chunk_size': HTTP_CHUNK_SIZE,
-                'save_interval': HTTP_CHUNK_SIZE,
                 'n_processes': processes,
             },
             'download': {
                 'dir': '.',
+                'save_interval': SAVE_INTERVAL,
+                'http_chunk_size': HTTP_CHUNK_SIZE,
                 'no_segment_md5sum': False,
                 'no_file_md5sum': False,
                 'no_verify': False,
@@ -56,10 +75,10 @@ class GDCClientConfigShared(object):
                 'no_auto_retry': False,
                 'retry_amount': 1,
                 'wait_time': 5.0,
-                'manifest': [],
             },
             'upload': {
                 'path': '.',
+                'upload_part_size': UPLOAD_PART_SIZE,
                 'insecure': False,
                 'disable_multipart': False,
             },
@@ -98,5 +117,8 @@ class GDCClientConfigShared(object):
     def to_display_string(self, section):
         _config = self.to_dict(section)
 
-        return '\n'.join(' = '.join([key, str(val)])
-                         for key, val in _config.items())
+        return DISPLAY_TEMPLATE.format(
+            section,
+            '\n'.join(' = '.join([key, str(val)])
+            for key, val in _config.items())
+        )

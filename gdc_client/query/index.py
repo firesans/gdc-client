@@ -1,11 +1,11 @@
+import logging
+from json import dumps
 from urlparse import urljoin
 
-import logging
 import requests
-from json import dumps
-
 
 log = logging.getLogger('query')
+
 
 class GDCIndexClient(object):
 
@@ -16,29 +16,29 @@ class GDCIndexClient(object):
         self.metadata = dict()
 
     def get_related_files(self, uuid):
-        # type: str -> List[str]
+        # type: (str) -> list[str]
         if uuid in self.metadata.keys():
             return self.metadata[uuid]['related_files']
         return []
 
     def get_annotations(self, uuid):
-        # type: str -> List[str]
+        # type: (str) -> list[str]
         if uuid in self.metadata.keys():
             return self.metadata[uuid]['annotations']
         return []
 
     def get_md5sum(self, uuid):
-        # type: str -> str
+        # type: (str) -> str
         if uuid in self.metadata.keys():
             return self.metadata[uuid]['md5sum']
 
     def get_filesize(self, uuid):
-        # type: str -> long
+        # type: (str) -> long
         if uuid in self.metadata.keys():
             return long(self.metadata[uuid]['file_size'])
 
     def get_access(self, uuid):
-        # type: str -> long
+        # type: (str) -> long
         if uuid in self.metadata.keys():
             return self.metadata[uuid]['access']
 
@@ -106,11 +106,11 @@ class GDCIndexClient(object):
         }
 
         metadata_query = {
-            'fields': 'file_id,file_size,md5sum,annotations.annotation_id,' \
+            'fields': 'file_id,file_size,md5sum,annotations.annotation_id,'
                       'metadata_files.file_id,index_files.file_id,access',
             'filters': dumps(filters),
             'from': '0',
-            'size': str(len(uuids)), # one big request
+            'size': str(len(uuids)),  # one big request
         }
 
         active_meta_url = urljoin(self.uri, self.active_meta_endpoint)
@@ -121,14 +121,14 @@ class GDCIndexClient(object):
 
         if not active_hits and not legacy_hits:
             log.debug('Unable to retrieve file metadata information. '
-                        'continuing downloading as if they were large files')
+                      'continuing downloading as if they were large files')
             return self.metadata
 
         for h in active_hits + legacy_hits:
             related_returns = h.get('index_files', []) + h.get('metadata_files', [])
-            related_files = [ r['file_id'] for r in related_returns ]
+            related_files = [r['file_id'] for r in related_returns]
 
-            annotations = [ a['annotation_id'] for a in h.get('annotations', []) ]
+            annotations = [a['annotation_id'] for a in h.get('annotations', [])]
 
             # set the metadata as a class data member so that it can be
             # references as much as needed without needing to calculate
@@ -237,7 +237,7 @@ class GDCIndexClient(object):
         smalls = smalls_open + smalls_control
 
         # for logging/reporting purposes
-        total_count = len(bigs) + sum([ len(s) for s in smalls ])
+        total_count = len(bigs) + sum([ len(s) for s in smalls])
         if len(potential_smalls) > total_count:
             log.warning('There are less files to download than originally given')
             log.warning('Number of files originally given: {0}'\
@@ -246,6 +246,6 @@ class GDCIndexClient(object):
         log.debug('{0} total number of files to download'.format(total_count))
         log.debug('{0} groupings of files'.format(len(smalls)))
 
-        smalls = [ s for s in smalls if s != [] ]
+        smalls = [s for s in smalls if s != []]
 
         return list(bigs), smalls
